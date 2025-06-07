@@ -15,6 +15,10 @@ mod colr;
 /// Provides access to the layout of a text node.
 pub mod layout;
 
+/// The ID of a glyph within a font
+#[derive(Copy, Clone, Debug)]
+pub struct GlyphId(pub u16);
+
 /// A shorthand for [FontResolver]'s font selection function.
 ///
 /// This function receives a font specification (families + a style, weight,

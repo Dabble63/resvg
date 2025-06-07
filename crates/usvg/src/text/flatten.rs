@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use fontdb::{Database, ID};
 use rustybuzz::ttf_parser;
-use rustybuzz::ttf_parser::{GlyphId, RasterImageFormat, RgbaColor};
+use rustybuzz::ttf_parser::{RasterImageFormat, RgbaColor};
 use tiny_skia_path::{NonZeroRect, Size, Transform};
 use xmlwriter::XmlWriter;
 
@@ -211,7 +211,7 @@ impl DatabaseExt for Database {
                 builder: tiny_skia_path::PathBuilder::new(),
             };
 
-            font.outline_glyph(glyph_id, &mut builder)?;
+            font.outline_glyph(ttf_parser::GlyphId(glyph_id.0), &mut builder)?;
             builder.builder.finish()
         })?
     }
@@ -219,7 +219,7 @@ impl DatabaseExt for Database {
     fn raster(&self, id: ID, glyph_id: GlyphId) -> Option<BitmapImage> {
         self.with_face_data(id, |data, face_index| -> Option<BitmapImage> {
             let font = ttf_parser::Face::parse(data, face_index).ok()?;
-            let image = font.glyph_raster_image(glyph_id, u16::MAX)?;
+            let image = font.glyph_raster_image(ttf_parser::GlyphId(glyph_id.0), u16::MAX)?;
 
             if image.format == RasterImageFormat::PNG {
                 let bitmap_image = BitmapImage {
@@ -240,7 +240,7 @@ impl DatabaseExt for Database {
                     x: image.x,
                     y: image.y,
                     pixels_per_em: image.pixels_per_em,
-                    glyph_bbox: font.glyph_bounding_box(glyph_id),
+                    glyph_bbox: font.glyph_bounding_box(ttf_parser::GlyphId(glyph_id.0)),
                     // ttf-parser always checks sbix first, so if this table exists, it was used.
                     is_sbix: font.tables().sbix.is_some(),
                 };
@@ -261,7 +261,7 @@ impl DatabaseExt for Database {
         // add a cache so we don't need to reparse the data every time.
         self.with_face_data(id, |data, face_index| -> Option<Node> {
             let font = ttf_parser::Face::parse(data, face_index).ok()?;
-            let image = font.glyph_svg_image(glyph_id)?;
+            let image = font.glyph_svg_image(ttf_parser::GlyphId(glyph_id.0))?;
             let tree = Tree::from_data(image.data, &Options::default()).ok()?;
 
             // Twitter Color Emoji seems to always have one SVG record per glyph,
@@ -310,7 +310,7 @@ impl DatabaseExt for Database {
             };
 
             face.paint_color_glyph(
-                glyph_id,
+                ttf_parser::GlyphId(glyph_id.0),
                 0,
                 RgbaColor::new(0, 0, 0, 255),
                 &mut glyph_painter,

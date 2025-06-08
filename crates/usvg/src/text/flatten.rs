@@ -7,6 +7,7 @@ use std::sync::Arc;
 use fontdb::{Database, ID};
 use rustybuzz::ttf_parser;
 use rustybuzz::ttf_parser::{RasterImageFormat, RgbaColor};
+use skrifa::raw::TableProvider as _;
 use tiny_skia_path::{NonZeroRect, Size, Transform};
 use xmlwriter::XmlWriter;
 
@@ -253,6 +254,9 @@ impl DatabaseExt for Database {
     }
 
     fn svg(&self, id: ID, glyph_id: GlyphId) -> Option<Node> {
+        // SEE: https://docs.rs/ttf-parser/latest/src/ttf_parser/tables/svg.rs.html#69-79
+        // SEE: https://docs.rs/read-fonts/latest/read_fonts/tables/svg/type.Svg.html
+
         // TODO: Technically not 100% accurate because the SVG format in a OTF font
         // is actually a subset/superset of a normal SVG, but it seems to work fine
         // for Twitter Color Emoji, so might as well use what we already have.
@@ -260,9 +264,9 @@ impl DatabaseExt for Database {
         // TODO: Glyph records can contain the data for multiple glyphs. We should
         // add a cache so we don't need to reparse the data every time.
         self.with_face_data(id, |data, face_index| -> Option<Node> {
-            let font = ttf_parser::Face::parse(data, face_index).ok()?;
-            let image = font.glyph_svg_image(ttf_parser::GlyphId(glyph_id.0))?;
-            let tree = Tree::from_data(image.data, &Options::default()).ok()?;
+            let font = skrifa::FontRef::from_index(data, face_index).ok()?;
+            let image_data = font.svg().ok()?.glyph_data(glyph_id.into()).ok()??;
+            let tree = Tree::from_data(image_data, &Options::default()).ok()?;
 
             // Twitter Color Emoji seems to always have one SVG record per glyph,
             // while Noto Color Emoji sometimes contains multiple ones. It's kind of hacky,

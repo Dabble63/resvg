@@ -3,6 +3,8 @@
 
 use crate::parser::OptionLog;
 use rustybuzz::ttf_parser;
+use skrifa::{color::{Brush, Extend, Transform}, outline::DrawSettings, MetadataProvider};
+use std::fmt::Write as _;
 
 struct Builder<'a>(&'a mut String);
 
@@ -40,10 +42,32 @@ impl ttf_parser::OutlineBuilder for Builder<'_> {
     }
 }
 
+impl skrifa::outline::OutlinePen for Builder<'_> {
+    fn move_to(&mut self, x: f32, y: f32) {
+        write!(self.0, "M {} {} ", x, y).unwrap();
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        write!(self.0, "L {} {} ", x, y).unwrap();
+    }
+
+    fn quad_to(&mut self, cx0: f32, cy0: f32, x: f32, y: f32) {
+        write!(self.0, "Q {} {} {} {} ", cx0, cy0, x, y).unwrap();
+    }
+
+    fn curve_to(&mut self, cx0: f32, cy0: f32, cx1: f32, cy1: f32, x: f32, y: f32) {
+        write!(self.0, "C {} {} {} {} {} {} ", cx0, cy0, cx1, cy1, x, y).unwrap();
+    }
+
+    fn close(&mut self) {
+        self.0.push_str("Z ");
+    }
+}
+
 trait XmlWriterExt {
     fn write_color_attribute(&mut self, name: &str, ts: ttf_parser::RgbaColor);
-    fn write_transform_attribute(&mut self, name: &str, ts: ttf_parser::Transform);
-    fn write_spread_method_attribute(&mut self, method: ttf_parser::colr::GradientExtend);
+    fn write_transform_attribute(&mut self, name: &str, ts: Transform);
+    fn write_spread_method_attribute(&mut self, method: Extend);
 }
 
 impl XmlWriterExt for xmlwriter::XmlWriter {
@@ -54,8 +78,8 @@ impl XmlWriterExt for xmlwriter::XmlWriter {
         );
     }
 
-    fn write_transform_attribute(&mut self, name: &str, ts: ttf_parser::Transform) {
-        if ts.is_default() {
+    fn write_transform_attribute(&mut self, name: &str, ts: Transform) {
+        if ts == Transform::default() {
             return;
         }
 
@@ -63,18 +87,19 @@ impl XmlWriterExt for xmlwriter::XmlWriter {
             name,
             format_args!(
                 "matrix({} {} {} {} {} {})",
-                ts.a, ts.b, ts.c, ts.d, ts.e, ts.f
+                ts.xx, ts.yx, ts.yx, ts.yy, ts.dx, ts.dy
             ),
         );
     }
 
-    fn write_spread_method_attribute(&mut self, extend: ttf_parser::colr::GradientExtend) {
+    fn write_spread_method_attribute(&mut self, extend: Extend) {
         self.write_attribute(
             "spreadMethod",
             match extend {
-                ttf_parser::colr::GradientExtend::Pad => &"pad",
-                ttf_parser::colr::GradientExtend::Repeat => &"repeat",
-                ttf_parser::colr::GradientExtend::Reflect => &"reflect",
+                Extend::Pad => &"pad",
+                Extend::Repeat => &"repeat",
+                Extend::Reflect => &"reflect",
+                _ => return,
             },
         );
     }
@@ -83,14 +108,15 @@ impl XmlWriterExt for xmlwriter::XmlWriter {
 // NOTE: This is only a best-effort translation of COLR into SVG.
 pub(crate) struct GlyphPainter<'a> {
     pub(crate) face: &'a ttf_parser::Face<'a>,
+    pub(crate) font: &'a skrifa::FontRef<'a>,
     pub(crate) svg: &'a mut xmlwriter::XmlWriter,
     pub(crate) path_buf: &'a mut String,
     pub(crate) gradient_index: usize,
     pub(crate) clip_path_index: usize,
     pub(crate) palette_index: u16,
-    pub(crate) transform: ttf_parser::Transform,
-    pub(crate) outline_transform: ttf_parser::Transform,
-    pub(crate) transforms_stack: Vec<ttf_parser::Transform>,
+    pub(crate) transform: Transform,
+    pub(crate) outline_transform: Transform,
+    pub(crate) transforms_stack: Vec<Transform>,
 }
 
 impl<'a> GlyphPainter<'a> {
@@ -105,10 +131,10 @@ impl<'a> GlyphPainter<'a> {
         }
     }
 
-    fn paint_solid(&mut self, color: ttf_parser::RgbaColor) {
+    fn paint_solid(&mut self, palette_index: u16, alpha: f32) {
         self.svg.start_element("path");
         self.svg.write_color_attribute("fill", color);
-        let opacity = f32::from(color.alpha) / 255.0;
+        let opacity = alpha / 255.0;
         self.svg.write_attribute("fill-opacity", &opacity);
         self.svg
             .write_transform_attribute("transform", self.outline_transform);
@@ -189,10 +215,7 @@ impl<'a> GlyphPainter<'a> {
     }
 }
 
-fn paint_transform(
-    outline_transform: ttf_parser::Transform,
-    transform: ttf_parser::Transform,
-) -> ttf_parser::Transform {
+fn paint_transform(outline_transform: Transform, transform: Transform) -> Transform {
     let outline_transform = tiny_skia_path::Transform::from_row(
         outline_transform.a,
         outline_transform.b,
@@ -217,7 +240,7 @@ fn paint_transform(
         .unwrap_or_default()
         .pre_concat(gradient_transform);
 
-    ttf_parser::Transform {
+    Transform {
         a: gradient_transform.sx,
         b: gradient_transform.ky,
         c: gradient_transform.kx,
@@ -244,6 +267,115 @@ impl GlyphPainter<'_> {
         self.svg.start_element("g");
         self.svg
             .write_attribute_fmt("clip-path", format_args!("url(#{})", clip_id));
+    }
+}
+
+impl<'a> skrifa::color::ColorPainter for GlyphPainter<'a> {
+    fn push_transform(&mut self, transform: Transform) {
+        self.transforms_stack.push(self.transform);
+        self.transform = transform * self.transform;
+    }
+
+    fn pop_transform(&mut self) {
+        if let Some(ts) = self.transforms_stack.pop() {
+            self.transform = ts;
+        }
+    }
+
+    fn push_clip_glyph(&mut self, glyph_id: skrifa::GlyphId) {
+        let mut path_buf = String::new();
+        let mut builder = Builder(&mut path_buf);
+
+        match self.font.outline_glyphs().get(glyph_id) {
+            Some(outliner) => outliner.draw(DrawSettings::unhinted(size, location), pen),
+            None => return,
+        };
+        builder.finish();
+
+        // We have to write outline using the current transform.
+        self.outline_transform = self.transform;
+    }
+
+    fn push_clip_box(&mut self, clip_box: skrifa::raw::types::BoundingBox<f32>) {
+        let x_min = clip_box.x_min;
+        let x_max = clip_box.x_max;
+        let y_min = clip_box.y_min;
+        let y_max = clip_box.y_max;
+
+        let clip_path = format!(
+            "M {} {} L {} {} L {} {} L {} {} Z",
+            x_min, y_min, x_max, y_min, x_max, y_max, x_min, y_max
+        );
+
+        self.clip_with_path(&clip_path);
+    }
+
+    fn pop_clip(&mut self) {
+        self.svg.end_element();
+    }
+
+    fn fill(&mut self, brush: Brush<'_>) {
+        match brush {
+            Brush::Solid {
+                palette_index,
+                alpha,
+            } => self.paint_solid(palette_index, alpha),
+            Brush::LinearGradient {
+                p0,
+                p1,
+                color_stops,
+                extend,
+            } => self.paint_linear_gradient(p0, p1, color_stops, extend),
+            Brush::RadialGradient {
+                c0,
+                r0,
+                c1,
+                r1,
+                color_stops,
+                extend,
+            } => self.paint_radial_gradient(c0, r0, c1, r1, color_stops, extend),
+            Brush::SweepGradient {
+                c0,
+                start_angle,
+                end_angle,
+                color_stops,
+                extend,
+            } => self.paint_sweep_gradient(c0, start_angle, end_angle, color_stops, extend),
+        }
+    }
+
+    fn push_layer(&mut self, composite_mode: skrifa::color::CompositeMode) {
+        self.svg.start_element("g");
+
+        use skrifa::color::CompositeMode;
+        // TODO: Need to figure out how to represent the other blend modes
+        // in SVG.
+        let composite_mode = match composite_mode {
+            CompositeMode::SrcOver => "normal",
+            CompositeMode::Screen => "screen",
+            CompositeMode::Overlay => "overlay",
+            CompositeMode::Darken => "darken",
+            CompositeMode::Lighten => "lighten",
+            CompositeMode::ColorDodge => "color-dodge",
+            CompositeMode::ColorBurn => "color-burn",
+            CompositeMode::HardLight => "hard-light",
+            CompositeMode::SoftLight => "soft-light",
+            CompositeMode::Difference => "difference",
+            CompositeMode::Exclusion => "exclusion",
+            CompositeMode::Multiply => "multiply",
+            CompositeMode::HslHue => "hue",
+            CompositeMode::HslSaturation => "saturation",
+            CompositeMode::HslColor => "color",
+            CompositeMode::HslLuminosity => "luminosity",
+            _ => {
+                println!("Warning: unsupported blend mode: {:?}", composite_mode);
+                "normal"
+            }
+        };
+        self.svg.write_attribute_fmt(
+            "style",
+            format_args!("mix-blend-mode: {}; isolation: isolate", composite_mode),
+        );
     }
 }
 

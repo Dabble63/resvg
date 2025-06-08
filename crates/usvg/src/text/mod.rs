@@ -19,6 +19,12 @@ pub mod layout;
 #[derive(Copy, Clone, Debug)]
 pub struct GlyphId(pub u16);
 
+impl From<GlyphId> for skrifa::raw::types::GlyphId {
+    fn from(value: GlyphId) -> Self {
+        Self::new(value.0 as u32)
+    }
+}
+
 /// A shorthand for [FontResolver]'s font selection function.
 ///
 /// This function receives a font specification (families + a style, weight,
